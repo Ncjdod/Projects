@@ -30,3 +30,9 @@ y = la.solve(A, b) #2
 
 a = la.solve(L, b) #3
 b = la.solve(U, a)
+
+print("Solution using inv and dot:", x)
+print("Solution using solve:", y)
+print("Solution using LU decomposition:", b)
+print("Lower Triangular Matrix L:\n", L)
+print("Upper Triangular Matrix U:\n", U)
