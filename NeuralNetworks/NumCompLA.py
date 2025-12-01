@@ -30,3 +30,8 @@ y = la.solve(A, b) #2
 
 a = la.solve(L, b) #3
 b = la.solve(U, a)
+
+print(x)
+print(y)
+print(b)
+
