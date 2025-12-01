@@ -35,3 +35,9 @@ print(x)
 print(y)
 print(b)
 
+
+print("Solution using inv and dot:", x)
+print("Solution using solve:", y)
+print("Solution using LU decomposition:", b)
+print("Lower Triangular Matrix L:\n", L)
+print("Upper Triangular Matrix U:\n", U)
