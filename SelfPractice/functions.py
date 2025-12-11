@@ -47,3 +47,5 @@ def random_walk(p_0, N):
     else:
       position_array[step] = position_array[step-1] + np.array([0, random.choice([-1, 1])])
   return step_array, position_array
+
+
