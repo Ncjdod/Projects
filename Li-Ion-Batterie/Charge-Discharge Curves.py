@@ -14,10 +14,7 @@ df_charge_discharge = pd.read_csv(file_path)
 CYCLE_TITLES = {
     2: "SEI Formation",
     5: "Stress Prep",
-    9: "Rate Capability C/2",
-    13: "Rate Capability C",
-    17: "Rate Capability 2C",
-    21: "Rate Capability 4C"
+    9: "Rate Capability C/2"
 }
 
 def plot_combined_cycle(cycle_number):
@@ -82,7 +79,7 @@ def plot_combined_cycle(cycle_number):
     return fig, ax
 
 # Vectorize/Iterate over specific cycles
-target_cycles = [2, 5, 9, 13, 17, 21]
+target_cycles = [2, 5, 9]
 
 all_figures = []
 all_axes = []
