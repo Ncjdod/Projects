@@ -45,7 +45,7 @@ class Config:
     """All hyperparameters in one place."""
     
     # --- Model ---
-    n_fourier = 32          # Fourier basis functions
+    n_fourier = 16          # Fourier basis functions
     fourier_sigma = 1.0     # Fourier frequency scale
     seed = 42
     
@@ -64,8 +64,8 @@ class Config:
     # --- Curriculum ---
     T_start = 5.0           # Start with 5ms window
     T_end = 55.0            # Full window
-    n_stages = 10
-    epochs_per_stage = 300
+    n_stages = 5
+    epochs_per_stage = 100
     schedule = 'linear'
     physics_weight_start = 10.0
     physics_weight_end = 1.0
@@ -75,11 +75,11 @@ class Config:
     weights_lr = 1e-2       # Weights learn faster (ascent)
     grad_clip_norm = 1.0    # Global gradient norm clipping
     log_weight_clamp = 5.0  # Adversarial log-weight bounds [-5, 5]
-    n_colloc = 64           # Collocation points per step
+    n_colloc = 32           # Collocation points per step
     n_loss_weights = 8      # Adversarial weight bins
-    log_every = 50          # Print every N epochs
-    plot_every = 500        # Plot every N epochs
-    checkpoint_every = 500  # Save checkpoint every N epochs
+    log_every = 25          # Print every N epochs
+    plot_every = 100        # Plot every N epochs
+    checkpoint_every = 100  # Save checkpoint every N epochs
     checkpoint_dir = "HH_model/checkpoints"
     val_split = 0.8         # Fraction of data for training (rest for validation)
 

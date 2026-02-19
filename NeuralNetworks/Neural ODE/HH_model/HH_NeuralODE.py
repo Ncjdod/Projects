@@ -4,7 +4,7 @@ HH Neural ODE Model
 Architecture:
   - Input normalization (scales heterogeneous units to ~[-1, 1])
   - Fixed Fourier Features (non-trainable) for spectral learning
-  - 4-layer MLP (128 neurons each) with tanh activation
+  - 2-layer MLP (64 neurons each) with tanh activation
   - 4D output: [dV/dt, dm/dt, dh/dt, dn/dt]
   - Diffrax adaptive integration
 
@@ -63,7 +63,7 @@ class HHNeuralODE(eqx.Module):
 
     Architecture:
         Input: [t, V, m, h, n, I_ext] -> normalize -> FourierFeatures
-               -> 4x(Linear(128) + tanh) -> Linear(4)
+               -> 2x(Linear(64) + tanh) -> Linear(4)
                -> [dV/dt, dm/dt, dh/dt, dn/dt]
 
     The model learns the full 4D dynamics:
@@ -81,25 +81,23 @@ class HHNeuralODE(eqx.Module):
             sigma:     Fourier frequency scale
             key:       JAX PRNG key
         """
-        keys = jax.random.split(key, 6)
+        keys = jax.random.split(key, 4)
 
         input_dim = 6  # [t, V, m, h, n, I_ext]
         fourier_out_dim = 2 * n_fourier  # sin + cos
-        hidden_dim = 128
+        hidden_dim = 64
 
         # Fixed Fourier features
         self.fourier = FourierFeatures(input_dim, n_fourier, sigma=sigma, key=keys[0])
 
-        # 4 hidden layers, 128 neurons each
+        # 2 hidden layers, 64 neurons each
         self.layers = [
             eqx.nn.Linear(fourier_out_dim, hidden_dim, key=keys[1]),
             eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[2]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[3]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[4]),
         ]
 
         # Output: [dV/dt, dm/dt, dh/dt, dn/dt]
-        self.output_layer = eqx.nn.Linear(hidden_dim, 4, key=keys[5])
+        self.output_layer = eqx.nn.Linear(hidden_dim, 4, key=keys[3])
 
     @staticmethod
     def normalize_inputs(t, V, m, h, n, I_ext):
@@ -201,7 +199,7 @@ def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
         y0=y0,
         saveat=saveat,
         stepsize_controller=stepsize_controller,
-        max_steps=16384,
+        max_steps=4096,
         throw=False,
     )
 
