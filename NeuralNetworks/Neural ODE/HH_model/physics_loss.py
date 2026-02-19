@@ -59,40 +59,48 @@ class LossWeights(eqx.Module):
 # ============================================================
 # Physics Residual
 # ============================================================
-def physics_residual(model, hh, V_samples, t_samples, I_ext_samples):
+def physics_residual(model, hh, V_samples, t_samples, I_ext_model, I_ext_hh):
     """
-    Compute physics residual: how well does the neural ODE 
+    Compute full 4D physics residual: how well does the neural ODE
     match the HH equations at sampled state points.
-    
-    Since the model only predicts dV/dt and we don't have 
-    gating variables, we use steady-state approximations:
-      m ~ m_inf(V),  h ~ h_inf(V),  n ~ n_inf(V)
-    
+
+    Compares all 4 derivatives [dV/dt, dm/dt, dh/dt, dn/dt] against
+    the full HH dynamics. Collocation states use steady-state gating
+    as an approximation for the sampling points: [V, m_inf, h_inf, n_inf].
+
+    The model sees I_ext in pA (matching Allen Brain data units),
+    while the HH equations require I_ext in uA/cm2. These are
+    provided as separate arguments for correct unit handling.
+
     Args:
-        model:         HHNeuralODE instance
-        hh:            HodgkinHuxley instance
-        V_samples:     Voltage samples (N,)
-        t_samples:     Time samples (N,)
-        I_ext_samples: External current at those times (N,)
-    
+        model:       HHNeuralODE instance (4D output)
+        hh:          HodgkinHuxley instance
+        V_samples:   Voltage samples (N,)
+        t_samples:   Time samples (N,)
+        I_ext_model: External current for neural ODE, in pA (N,)
+        I_ext_hh:    External current for HH equations, in uA/cm2 (N,)
+
     Returns:
         residuals: Per-sample squared residual (N,)
     """
-    def single_residual(V, t, I_ext):
-        # Neural ODE prediction
-        y = jnp.array([V])
-        dVdt_net = model(t, y, I_ext)[0]
-        
-        # HH prediction (using steady-state gating variables)
+    def single_residual(V, t, I_model, I_hh):
+        # Construct full 4D state using steady-state gating
         m = hh.m_inf(V)
         h = hh.h_inf(V)
         n = hh.n_inf(V)
-        dVdt_hh = hh.dVdt(V, m, h, n, I_ext)
-        
-        return (dVdt_net - dVdt_hh) ** 2
-    
+        state = jnp.array([V, m, h, n])
+
+        # Neural ODE prediction (4D, sees pA)
+        dydt_net = model(t, state, I_model)  # [dV, dm, dh, dn]
+
+        # HH reference prediction (4D, sees uA/cm2)
+        dydt_hh = hh(t, state, I_hh)  # [dV, dm, dh, dn]
+
+        # Sum of squared residuals over all 4 components
+        return jnp.sum((dydt_net - dydt_hh) ** 2)
+
     # Vectorize over samples
-    residuals = jax.vmap(single_residual)(V_samples, t_samples, I_ext_samples)
+    residuals = jax.vmap(single_residual)(V_samples, t_samples, I_ext_model, I_ext_hh)
     return residuals
 
 
@@ -100,28 +108,29 @@ def physics_residual(model, hh, V_samples, t_samples, I_ext_samples):
 # Adversarial Loss
 # ============================================================
 def adversarial_physics_loss(model, loss_weights, hh,
-                              V_samples, t_samples, I_ext_samples):
+                              V_samples, t_samples, I_ext_model, I_ext_hh):
     """
     Self-Adaptive physics loss with trainable weights.
-    
+
     L = sum_i exp(s_i) * R_i - sum_i s_i
-    
+
     The -s_i regularization prevents weights from going to infinity.
-    
+
     Args:
-        model:         HHNeuralODE instance
-        loss_weights:  LossWeights instance (trainable)
-        hh:            HodgkinHuxley instance
-        V_samples:     Voltage collocation points (N,)
-        t_samples:     Time collocation points (N,)
-        I_ext_samples: External current at collocation points (N,)
-    
+        model:       HHNeuralODE instance
+        loss_weights: LossWeights instance (trainable)
+        hh:          HodgkinHuxley instance
+        V_samples:   Voltage collocation points (N,)
+        t_samples:   Time collocation points (N,)
+        I_ext_model: External current for neural ODE, in pA (N,)
+        I_ext_hh:    External current for HH equations, in uA/cm2 (N,)
+
     Returns:
         total_loss: Scalar loss (to be minimized by model, maximized by weights)
         info:       Dict with diagnostic information
     """
     # Compute per-sample residuals
-    residuals = physics_residual(model, hh, V_samples, t_samples, I_ext_samples)
+    residuals = physics_residual(model, hh, V_samples, t_samples, I_ext_model, I_ext_hh)
     
     # Weighted loss: exp(s_i) * R_i
     weights = loss_weights.weights  # (N,) or broadcastable
@@ -152,15 +161,15 @@ def adversarial_physics_loss(model, loss_weights, hh,
 # ============================================================
 # Full Loss (Data + Physics)
 # ============================================================
-def total_loss_fn(model, loss_weights, hh, 
+def total_loss_fn(model, loss_weights, hh,
                   y0, t_span, I_ext_fn, y_target,
-                  V_colloc, t_colloc, I_colloc,
+                  V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
                   physics_weight=1.0):
     """
     PLACEHOLDER: Combined data + adversarial physics loss.
-    
+
     L_total = L_data + physics_weight * L_physics_adversarial
-    
+
     Args:
         model:          HHNeuralODE
         loss_weights:   LossWeights (trainable, gradient ascent)
@@ -171,9 +180,10 @@ def total_loss_fn(model, loss_weights, hh,
         y_target:       Target voltage from Allen Brain data
         V_colloc:       Voltage collocation points for physics
         t_colloc:       Time collocation points
-        I_colloc:       Current at collocation points
+        I_colloc_model: Current at collocation points in pA (for neural ODE)
+        I_colloc_hh:    Current at collocation points in uA/cm2 (for HH)
         physics_weight: Overall physics loss scale
-    
+
     Returns:
         loss, info
     """
@@ -183,43 +193,45 @@ def total_loss_fn(model, loss_weights, hh,
     # y_pred = integrate(model, y0, t_span, I_ext_fn)
     # data_loss = jnp.mean((y_pred[:, 0] - y_target) ** 2)
     data_loss = 0.0  # PLACEHOLDER
-    
+
     # --- Adversarial physics loss ---
     phys_loss, phys_info = adversarial_physics_loss(
-        model, loss_weights, hh, V_colloc, t_colloc, I_colloc
+        model, loss_weights, hh, V_colloc, t_colloc, I_colloc_model, I_colloc_hh
     )
-    
+
     total = data_loss + physics_weight * phys_loss
-    
+
     info = {
         'total_loss': total,
         'data_loss': data_loss,
         **phys_info,
     }
-    
+
     return total, info
 
 
 # ============================================================
 # Minimax Training Step
 # ============================================================
-def minimax_step(model, loss_weights, 
+def minimax_step(model, loss_weights,
                  model_opt_state, weights_opt_state,
                  model_optimizer, weights_optimizer,
-                 hh, V_colloc, t_colloc, I_colloc):
+                 hh, V_colloc, t_colloc, I_colloc_model, I_colloc_hh):
     """
     Single minimax training step:
       1. Compute gradients of loss w.r.t. model AND weights
       2. Model:   gradient DESCENT (minimize)
       3. Weights: gradient ASCENT  (maximize)
-    
+
     Args:
         model, loss_weights:                   Trainable modules
         model_opt_state, weights_opt_state:    Optax states
         model_optimizer, weights_optimizer:    Optax optimizers
         hh:                                    HodgkinHuxley (fixed)
-        V_colloc, t_colloc, I_colloc:          Collocation points
-    
+        V_colloc, t_colloc:                    Collocation points
+        I_colloc_model:                        Current in pA (for neural ODE)
+        I_colloc_hh:                           Current in uA/cm2 (for HH)
+
     Returns:
         model, loss_weights, model_opt_state, weights_opt_state, info
     """
@@ -228,18 +240,18 @@ def minimax_step(model, loss_weights,
     @eqx.filter_value_and_grad(has_aux=True)
     def model_loss(model):
         return adversarial_physics_loss(
-            model, loss_weights, hh, V_colloc, t_colloc, I_colloc
+            model, loss_weights, hh, V_colloc, t_colloc, I_colloc_model, I_colloc_hh
         )
-    
+
     (loss, info), model_grads = model_loss(model)
-    
+
     # Gradient w.r.t. loss_weights (arg 0 of inner fn) -> for ascent
     @eqx.filter_value_and_grad(has_aux=True)
     def weight_loss(loss_weights):
         return adversarial_physics_loss(
-            model, loss_weights, hh, V_colloc, t_colloc, I_colloc
+            model, loss_weights, hh, V_colloc, t_colloc, I_colloc_model, I_colloc_hh
         )
-    
+
     (_, _), weight_grads = weight_loss(loss_weights)
     
     # --- Model update: gradient DESCENT ---
@@ -286,28 +298,30 @@ if __name__ == "__main__":
     key1, key2, key3 = jax.random.split(key, 3)
     V_colloc = jax.random.uniform(key1, (N,), minval=-80.0, maxval=40.0)
     t_colloc = jax.random.uniform(key2, (N,), minval=0.0, maxval=100.0)
-    I_colloc = jnp.ones(N) * 10.0  # Constant current
-    
+    I_colloc_pA = jnp.ones(N) * 200.0  # 200 pA (typical Allen stimulus)
+    pA_to_uA_per_cm2 = 1e-6 / 2e-5     # ~2000 um^2 soma
+    I_colloc_hh = I_colloc_pA * pA_to_uA_per_cm2  # ~10 uA/cm2
+
     # Compute loss
     loss, info = adversarial_physics_loss(
-        model, loss_weights, hh, V_colloc, t_colloc, I_colloc
+        model, loss_weights, hh, V_colloc, t_colloc, I_colloc_pA, I_colloc_hh
     )
     print(f"\nInitial loss: {loss:.4f}")
     print(f"Physics residual: {info['physics_loss']:.4f}")
     print(f"Weight range: [{info['min_weight']:.3f}, {info['max_weight']:.3f}]")
-    
+
     # Test minimax step
     model_opt = optax.adam(1e-3)
     weight_opt = optax.adam(1e-2)  # Weights can learn faster
-    
+
     model_opt_state = model_opt.init(eqx.filter(model, eqx.is_array))
     weight_opt_state = weight_opt.init(eqx.filter(loss_weights, eqx.is_array))
-    
+
     model, loss_weights, model_opt_state, weight_opt_state, info = minimax_step(
         model, loss_weights,
         model_opt_state, weight_opt_state,
         model_opt, weight_opt,
-        hh, V_colloc, t_colloc, I_colloc
+        hh, V_colloc, t_colloc, I_colloc_pA, I_colloc_hh
     )
     
     print(f"\nAfter 1 minimax step:")
