@@ -53,6 +53,13 @@ class Config:
     downsample_factor = 20  # 200kHz -> 10kHz
     window_pre = 5.0        # ms before first spike
     window_post = 50.0      # ms after first spike
+
+    # --- Unit Conversion ---
+    # Allen data: pA (picoamperes, absolute current)
+    # HH model:   uA/cm2 (current density)
+    # Typical cortical soma: ~2000 um^2 = 2e-5 cm^2
+    membrane_area_cm2 = 2e-5
+    pA_to_uA_per_cm2 = 1e-6 / 2e-5  # 0.05 uA/cm2 per pA
     
     # --- Curriculum ---
     T_start = 5.0           # Start with 5ms window
@@ -66,11 +73,16 @@ class Config:
     # --- Training ---
     model_lr = 1e-3
     weights_lr = 1e-2       # Weights learn faster (ascent)
+    grad_clip_norm = 1.0    # Global gradient norm clipping
+    log_weight_clamp = 5.0  # Adversarial log-weight bounds [-5, 5]
     n_colloc = 64           # Collocation points per step
     n_loss_weights = 8      # Adversarial weight bins
     log_every = 50          # Print every N epochs
     plot_every = 500        # Plot every N epochs
-    
+    checkpoint_every = 500  # Save checkpoint every N epochs
+    checkpoint_dir = "HH_model/checkpoints"
+    val_split = 0.8         # Fraction of data for training (rest for validation)
+
     # --- Integration ---
     dt0 = 0.01
     rtol = 1e-3
@@ -115,11 +127,12 @@ def load_allen_data(config):
     # Make time relative
     t_raw = t_raw - t_raw[0]
     
-    # Downsample
+    # Downsample with anti-aliasing (FIR low-pass filter before decimation)
+    from scipy.signal import decimate
     ds = config.downsample_factor
-    t_ds = t_raw[::ds]
-    v_ds = v_raw[::ds]
-    c_ds = c_raw[::ds]
+    v_ds = decimate(v_raw, ds, ftype='fir')
+    c_ds = decimate(c_raw, ds, ftype='fir')
+    t_ds = t_raw[::ds][:len(v_ds)]  # Match length after filtering
     
     # Find first spike and extract window
     crossings = np.diff(np.sign(v_ds - 0.0))
@@ -189,28 +202,36 @@ def data_loss_fn(model, y0, t_span, I_ext_fn, v_target):
 
 def combined_loss_fn(model, loss_weights, hh,
                      y0, t_span, I_ext_fn, v_target,
-                     V_colloc, t_colloc, I_colloc,
+                     V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
                      physics_weight):
     """
     Combined loss: Data MSE + Adversarial Physics.
-    
+
     L_total = L_data + lambda * L_physics_adversarial
-    
+
     Model params:  gradient DESCENT on L_total
     Loss weights:  gradient ASCENT  on L_total
     """
-    # --- Data loss ---
+    # --- Data loss (voltage only, since Allen data provides V) ---
     y_pred = integrate(model, y0, t_span, I_ext_fn,
                        dt0=0.01, rtol=1e-3, atol=1e-5)
     data_loss = jnp.mean((y_pred[:, 0] - v_target) ** 2)
-    
+
+    # --- Gating constraint: m, h, n must stay in [0, 1] ---
+    m_pred, h_pred, n_pred = y_pred[:, 1], y_pred[:, 2], y_pred[:, 3]
+    gating_penalty = jnp.mean(
+        jnp.maximum(0.0, -m_pred) + jnp.maximum(0.0, m_pred - 1.0) +
+        jnp.maximum(0.0, -h_pred) + jnp.maximum(0.0, h_pred - 1.0) +
+        jnp.maximum(0.0, -n_pred) + jnp.maximum(0.0, n_pred - 1.0)
+    )
+
     # --- Adversarial physics loss ---
     phys_loss, phys_info = adversarial_physics_loss(
-        model, loss_weights, hh, V_colloc, t_colloc, I_colloc
+        model, loss_weights, hh, V_colloc, t_colloc, I_colloc_model, I_colloc_hh
     )
-    
-    total = data_loss + physics_weight * phys_loss
-    
+
+    total = data_loss + physics_weight * phys_loss + 10.0 * gating_penalty
+
     info = {
         'total_loss': total,
         'data_loss': data_loss,
@@ -218,8 +239,9 @@ def combined_loss_fn(model, loss_weights, hh,
         'weighted_phys': phys_info['weighted_loss'],
         'mean_weight': phys_info['mean_weight'],
         'max_weight': phys_info['max_weight'],
+        'gating_penalty': gating_penalty,
     }
-    
+
     return total, info
 
 
@@ -231,11 +253,11 @@ def train_step(model, loss_weights,
                model_opt_state, weights_opt_state,
                model_optimizer, weights_optimizer,
                hh, y0, t_span, I_ext_fn, v_target,
-               V_colloc, t_colloc, I_colloc,
+               V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
                physics_weight):
     """
     Single minimax training step.
-    
+
     1. Compute combined loss
     2. Model params:  gradient DESCENT (minimize)
     3. Loss weights:  gradient ASCENT  (maximize)
@@ -246,22 +268,22 @@ def train_step(model, loss_weights,
         return combined_loss_fn(
             model, loss_weights, hh,
             y0, t_span, I_ext_fn, v_target,
-            V_colloc, t_colloc, I_colloc,
+            V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
             physics_weight
         )
-    
+
     (loss, info), model_grads = model_loss(model)
-    
+
     # --- Weight gradients (ascent) ---
     @eqx.filter_value_and_grad(has_aux=True)
     def weight_loss(loss_weights):
         return combined_loss_fn(
             model, loss_weights, hh,
             y0, t_span, I_ext_fn, v_target,
-            V_colloc, t_colloc, I_colloc,
+            V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
             physics_weight
         )
-    
+
     (_, _), weight_grads = weight_loss(loss_weights)
     
     # --- Update model (descent) ---
@@ -276,19 +298,26 @@ def train_step(model, loss_weights,
         neg_weight_grads, weights_opt_state, loss_weights
     )
     loss_weights = eqx.apply_updates(loss_weights, weight_updates)
-    
+
+    # --- Clamp adversarial log-weights to prevent runaway ---
+    loss_weights = eqx.tree_at(
+        lambda lw: lw.log_weights,
+        loss_weights,
+        jnp.clip(loss_weights.log_weights, -5.0, 5.0)
+    )
+
     return model, loss_weights, model_opt_state, weights_opt_state, info
 
 
 # ============================================================
 # Visualization
 # ============================================================
-def plot_progress(model, t_data, v_data, c_data, I_ext_fn,
+def plot_progress(model, hh, t_data, v_data, c_data, I_ext_fn,
                   epoch, info, loss_history, save_dir="HH_model"):
     """Plot current model predictions vs data."""
     os.makedirs(save_dir, exist_ok=True)
-    
-    y0 = jnp.array([v_data[0]])
+
+    y0 = hh.resting_state(v_data[0])
     y_pred = integrate(model, y0, t_data, I_ext_fn)
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -342,12 +371,12 @@ def plot_progress(model, t_data, v_data, c_data, I_ext_fn,
     plt.close()
     
 
-def plot_final(model, t_data, v_data, c_data, I_ext_fn,
+def plot_final(model, hh, t_data, v_data, c_data, I_ext_fn,
                loss_history, save_dir="HH_model"):
     """Final publication-quality plot."""
     os.makedirs(save_dir, exist_ok=True)
-    
-    y0 = jnp.array([v_data[0]])
+
+    y0 = hh.resting_state(v_data[0])
     y_pred = integrate(model, y0, t_data, I_ext_fn)
     
     fig, axes = plt.subplots(3, 1, figsize=(12, 12), 
@@ -405,8 +434,16 @@ def train(config=None):
     key = jax.random.PRNGKey(config.seed)
     
     # ---- 1. Load Data ----
-    t_full, v_full, c_full = load_allen_data(config)
+    t_all, v_all, c_all = load_allen_data(config)
+
+    # Train/validation split (temporal holdout)
+    n_train = int(config.val_split * len(t_all))
+    t_full, v_full, c_full = t_all[:n_train], v_all[:n_train], c_all[:n_train]
+    t_val, v_val, c_val = t_all[n_train:], v_all[n_train:], c_all[n_train:]
     I_ext_fn_full = make_I_ext_fn(t_full, c_full)
+    I_ext_fn_val = make_I_ext_fn(t_val, c_val)
+    print(f"Train: {len(t_full)} pts ({float(t_full[-1]):.1f}ms), "
+          f"Val: {len(t_val)} pts ({float(t_val[-1] - t_val[0]):.1f}ms)")
     
     # ---- 2. Create Model ----
     print("\n--- Creating Model ---")
@@ -432,9 +469,20 @@ def train(config=None):
     # ---- 4. Physics Model ----
     hh = HodgkinHuxley()
     
-    # ---- 5. Optimizers ----
-    model_optimizer = optax.adam(config.model_lr)
-    weights_optimizer = optax.adam(config.weights_lr)
+    # ---- 5. Optimizers (gradient clipping + LR scheduling) ----
+    model_lr_schedule = optax.cosine_decay_schedule(
+        init_value=config.model_lr,
+        decay_steps=config.total_epochs,
+        alpha=0.01  # Final LR = 1e-5
+    )
+    model_optimizer = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip_norm),
+        optax.adam(model_lr_schedule)
+    )
+    weights_optimizer = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip_norm),
+        optax.adam(config.weights_lr)
+    )
     
     model_opt_state = model_optimizer.init(eqx.filter(model, eqx.is_array))
     weight_opt_state = weights_optimizer.init(
@@ -460,6 +508,8 @@ def train(config=None):
     loss_history = []
     start_time = time.time()
     prev_stage = -1
+    best_data_loss = float('inf')
+    os.makedirs(config.checkpoint_dir, exist_ok=True)
     
     for epoch in range(config.total_epochs):
         # Get curriculum parameters
@@ -482,14 +532,17 @@ def train(config=None):
             continue
             
         I_ext_fn = make_I_ext_fn(t_sub, c_sub)
-        y0 = jnp.array([v_sub[0]])
+        y0 = hh.resting_state(v_sub[0])  # [V0, m_inf, h_inf, n_inf]
         
-        # Sample collocation points for physics loss
-        key, ckey = jax.random.split(key)
-        V_colloc, t_colloc, I_colloc = scheduler.get_collocation_points(
-            epoch, config.n_colloc, ckey
-        )
-        
+        # Sample collocation points from actual trajectory (not uniform random)
+        key, ckey1, ckey2 = jax.random.split(key, 3)
+        n_colloc = config.n_colloc
+        indices = jax.random.randint(ckey1, (n_colloc,), 0, len(t_sub))
+        V_colloc = v_sub[indices] + jax.random.normal(ckey2, (n_colloc,)) * 5.0
+        t_colloc = t_sub[indices]
+        I_colloc_pA = c_sub[indices]
+        I_colloc_hh = I_colloc_pA * config.pA_to_uA_per_cm2
+
         # Minimax step
         model, loss_weights, model_opt_state, weight_opt_state, info = \
             train_step(
@@ -497,7 +550,7 @@ def train(config=None):
                 model_opt_state, weight_opt_state,
                 model_optimizer, weights_optimizer,
                 hh, y0, t_sub, I_ext_fn, v_sub,
-                V_colloc, t_colloc, I_colloc,
+                V_colloc, t_colloc, I_colloc_pA, I_colloc_hh,
                 phys_w
             )
         
@@ -506,23 +559,45 @@ def train(config=None):
         info_np['epoch'] = epoch
         info_np['stage'] = stage_num
         info_np['T'] = T_curr
+
+        # Compute validation loss periodically
+        if epoch % config.log_every == 0 and len(t_val) >= 10:
+            y0_val = hh.resting_state(v_val[0])
+            y_pred_val = integrate(model, y0_val, t_val, I_ext_fn_val)
+            val_loss = float(jnp.mean((y_pred_val[:, 0] - v_val) ** 2))
+            info_np['val_loss'] = val_loss
+
         loss_history.append(info_np)
-        
+
         if epoch % config.log_every == 0:
             elapsed = time.time() - start_time
+            val_str = ""
+            if 'val_loss' in info_np:
+                val_str = f" | Val: {info_np['val_loss']:>10.4f}"
             print(f"  Epoch {epoch:>5} | "
                   f"Total: {info_np['total_loss']:>10.4f} | "
                   f"Data: {info_np['data_loss']:>10.4f} | "
                   f"Phys: {info_np['physics_loss']:>10.2f} | "
                   f"W_max: {info_np['max_weight']:>6.2f} | "
-                  f"T={T_curr:.1f}ms | "
+                  f"T={T_curr:.1f}ms{val_str} | "
                   f"{elapsed:.0f}s")
-        
+
         # Plot progress
         if epoch % config.plot_every == 0 and epoch > 0:
-            plot_progress(model, t_full, v_full, c_full, I_ext_fn_full,
+            plot_progress(model, hh, t_full, v_full, c_full, I_ext_fn_full,
                          epoch, info_np, loss_history)
-    
+
+        # Checkpoint + track best model
+        if epoch % config.checkpoint_every == 0 and epoch > 0:
+            ckpt_path = os.path.join(config.checkpoint_dir, f"model_epoch_{epoch:05d}.eqx")
+            eqx.tree_serialise_leaves(ckpt_path, model)
+
+        if info_np['data_loss'] < best_data_loss:
+            best_data_loss = info_np['data_loss']
+            eqx.tree_serialise_leaves(
+                os.path.join(config.checkpoint_dir, "best_model.eqx"), model
+            )
+
     # ---- 8. Final Results ----
     elapsed_total = time.time() - start_time
     print(f"\n--- Training Complete ({elapsed_total:.0f}s) ---")
@@ -530,7 +605,7 @@ def train(config=None):
     print(f"Final physics loss: {loss_history[-1]['physics_loss']:.4f}")
     
     # Final plot
-    plot_final(model, t_full, v_full, c_full, I_ext_fn_full, loss_history)
+    plot_final(model, hh, t_full, v_full, c_full, I_ext_fn_full, loss_history)
     
     # Save model
     model_path = os.path.join("HH_model", "trained_model.eqx")
