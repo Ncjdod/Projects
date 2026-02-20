@@ -7,10 +7,10 @@
 - [x] Format data for training (Ready in `AllenBrainLoader.py`)
 
 ## Step 2: Fix Neural ODE Training (step-by-step)
-- [ ] **NEXT:** Integrate real data into training pipeline
-- [ ] Train HH-PINN on real trajectory (forcing term)
-- [ ] Evaluate fit (MSE + Spike Timing)
-- [ ] Refine model (if needed)
+- [x] ~~**NEXT:** Integrate real data into training pipeline~~ *(cancelled)*
+- [x] ~~Train HH-PINN on real trajectory (forcing term)~~ *(cancelled)*
+- [x] ~~Evaluate fit (MSE + Spike Timing)~~ *(cancelled)*
+- [x] ~~Refine model (if needed)~~ *(cancelled)*
 
 ## Previous Work (Complete)
 - [x] HodgkinHuxley.py module
