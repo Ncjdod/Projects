@@ -177,7 +177,7 @@ def make_diffrax_term(model, I_ext_fn):
 
 
 def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
-              rtol=1e-3, atol=1e-5):
+              rtol=1e-3, atol=1e-5, max_steps=16384):
     """
     Integrate the Neural ODE forward in time.
 
@@ -189,6 +189,7 @@ def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
         dt0:       Initial step size
         solver:    Diffrax solver (default: Tsit5)
         rtol, atol: Tolerances for adaptive stepping
+        max_steps: Maximum solver steps (default 16384, use 4096 for segments)
 
     Returns:
         ys: Trajectory of shape (n_steps, 4)
@@ -210,7 +211,7 @@ def integrate(model, y0, t_span, I_ext_fn, dt0=0.01, solver=None,
         y0=y0,
         saveat=saveat,
         stepsize_controller=stepsize_controller,
-        max_steps=16384,
+        max_steps=max_steps,
         throw=False,
     )
 
