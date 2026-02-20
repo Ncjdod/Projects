@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import h5py
 
 # Import our loader
-from AllenBrainLoader import download_nwb, find_sweeps, get_sweep_data, SPECIMEN_ID
+from HH_model.AllenBrainLoader import download_nwb, find_sweeps, get_sweep_data, SPECIMEN_ID
 
 print("=" * 60)
 print("Allen Brain Data Verification for HH Neural ODE Training")
