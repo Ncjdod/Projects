@@ -93,7 +93,8 @@ def build_segment_arrays(t_data, V_data, c_data, boundaries, n_pts_per_seg, hh):
 # Parallel Integration
 # ============================================================
 def integrate_all_segments(model, all_ics, t_segments, t_data, c_data,
-                           dt0=0.01, rtol=1e-3, atol=1e-5, max_steps=4096):
+                           dt0=0.01, rtol=1e-3, atol=1e-5, max_steps=4096,
+                           adjoint=None):
     """
     Integrate all K segments in parallel using jax.vmap.
 
@@ -110,6 +111,8 @@ def integrate_all_segments(model, all_ics, t_segments, t_data, c_data,
         dt0:         Initial step size
         rtol, atol:  Tolerances
         max_steps:   Max ODE solver steps per segment
+        adjoint:     Diffrax adjoint method (None = RecursiveCheckpointAdjoint).
+                     Static PyTree, safe to capture in vmap closure.
 
     Returns:
         all_trajectories: (K, n_pts_per_seg, 4) predicted trajectories
@@ -117,7 +120,8 @@ def integrate_all_segments(model, all_ics, t_segments, t_data, c_data,
     def _single_segment(y0, t_span):
         I_ext_fn = lambda t: jnp.interp(t, t_data, c_data)
         return integrate(model, y0, t_span, I_ext_fn,
-                         dt0=dt0, rtol=rtol, atol=atol, max_steps=max_steps)
+                         dt0=dt0, rtol=rtol, atol=atol, max_steps=max_steps,
+                         adjoint=adjoint)
 
     return jax.vmap(_single_segment)(all_ics, t_segments)
 
@@ -188,7 +192,8 @@ def shooting_combined_loss(model, loss_weights, hh,
                            all_ics, t_segments, V_segments,
                            t_data, c_data,
                            V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
-                           physics_weight, continuity_weight):
+                           physics_weight, continuity_weight,
+                           adjoint=None):
     """
     Full multiple-shooting loss:
         L = data_loss + continuity_weight * continuity_loss
@@ -209,13 +214,15 @@ def shooting_combined_loss(model, loss_weights, hh,
         I_colloc_hh:       Collocation current in uA/cm2 (for HH)
         physics_weight:    Scalar weight for physics loss
         continuity_weight: Scalar weight for continuity loss
+        adjoint:           Diffrax adjoint method (None = RecursiveCheckpointAdjoint)
 
     Returns:
         total_loss: scalar
         info: dict with component losses
     """
     # Parallel integration of all segments
-    all_trajs = integrate_all_segments(model, all_ics, t_segments, t_data, c_data)
+    all_trajs = integrate_all_segments(model, all_ics, t_segments, t_data, c_data,
+                                       adjoint=adjoint)
 
     # Component losses
     d_loss = shooting_data_loss(all_trajs, V_segments)

@@ -100,9 +100,64 @@ class Config:
     rtol = 1e-3
     atol = 1e-5
 
+    # --- Adjoint Method ---
+    # Controls how gradients are backpropagated through the ODE solver.
+    # "backsolve":             Continuous adjoint (memory-efficient, approximate gradients)
+    # "recursive_checkpoint":  Discretise-then-optimise (exact gradients, higher memory)
+    # "direct":                Standard backprop through solver (no checkpointing)
+    adjoint_method = "backsolve"
+    adjoint_max_steps = None    # Max steps for backward pass (None = same as forward)
+    adjoint_rtol = None         # Backward pass rtol (None = same as forward)
+    adjoint_atol = None         # Backward pass atol (None = same as forward)
+
     @property
     def total_epochs(self):
         return self.n_stages * self.epochs_per_stage
+
+
+# ============================================================
+# Adjoint Factory
+# ============================================================
+def make_adjoint(config):
+    """
+    Create a diffrax adjoint method from configuration.
+
+    The adjoint method controls how gradients are backpropagated
+    through the ODE solver during training.
+
+    Args:
+        config: Config instance
+
+    Returns:
+        diffrax.AbstractAdjoint instance
+    """
+    if config.adjoint_method == "backsolve":
+        # Continuous adjoint: solves adjoint ODE backwards in time
+        # Memory-efficient O(1) but produces approximate gradients
+        kwargs = {}
+        if config.adjoint_max_steps is not None:
+            kwargs['max_steps'] = config.adjoint_max_steps
+        if config.adjoint_rtol is not None or config.adjoint_atol is not None:
+            rtol = config.adjoint_rtol if config.adjoint_rtol is not None else config.rtol
+            atol = config.adjoint_atol if config.adjoint_atol is not None else config.atol
+            kwargs['stepsize_controller'] = diffrax.PIDController(rtol=rtol, atol=atol)
+        return diffrax.BacksolveAdjoint(**kwargs)
+
+    elif config.adjoint_method == "recursive_checkpoint":
+        # Discretise-then-optimise: backprop through solver with checkpointing
+        # Exact gradients, O(n log n) memory
+        return diffrax.RecursiveCheckpointAdjoint()
+
+    elif config.adjoint_method == "direct":
+        # Standard backprop through solver (no checkpointing)
+        # Exact gradients, O(n) memory
+        return diffrax.DirectAdjoint()
+
+    else:
+        raise ValueError(
+            f"Unknown adjoint method: {config.adjoint_method}. "
+            f"Choose from: 'backsolve', 'recursive_checkpoint', 'direct'"
+        )
 
 
 # ============================================================
@@ -209,12 +264,14 @@ def shooting_train_step(model, loss_weights,
                         hh, all_ics, t_segments, V_segments,
                         t_data, c_data,
                         V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
-                        physics_weight, continuity_weight):
+                        physics_weight, continuity_weight,
+                        adjoint=None):
     """
     Single minimax training step with multiple shooting.
 
     All K segments integrate in parallel via jax.vmap.
     ICs are data-pinned (from Allen data, not trainable).
+    Gradients through ODE solver use the specified adjoint method.
 
     Two gradient computations:
       1. Model params:  gradient DESCENT (minimize total loss)
@@ -228,7 +285,8 @@ def shooting_train_step(model, loss_weights,
             all_ics, t_segments, V_segments,
             t_data, c_data,
             V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
-            physics_weight, continuity_weight
+            physics_weight, continuity_weight,
+            adjoint=adjoint
         )
 
     (loss, info), model_grads = model_loss(model)
@@ -241,7 +299,8 @@ def shooting_train_step(model, loss_weights,
             all_ics, t_segments, V_segments,
             t_data, c_data,
             V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
-            physics_weight, continuity_weight
+            physics_weight, continuity_weight,
+            adjoint=adjoint
         )
 
     (_, _), weight_grads = weight_loss(loss_weights)
@@ -484,7 +543,11 @@ def train(config=None):
     print("\n--- Curriculum Schedule ---")
     scheduler.summary()
 
-    # ---- 7. Training Loop ----
+    # ---- 7. Adjoint Method ----
+    adjoint = make_adjoint(config)
+    print(f"\nAdjoint method: {config.adjoint_method}")
+
+    # ---- 8. Training Loop ----
     print(f"\n--- Training ({config.total_epochs} epochs, multiple shooting) ---")
     loss_history = []
     start_time = time.time()
@@ -531,7 +594,7 @@ def train(config=None):
         I_colloc_pA = c_sub[indices]
         I_colloc_hh = I_colloc_pA * config.pA_to_uA_per_cm2
 
-        # Minimax step with multiple shooting
+        # Minimax step with multiple shooting (continuous adjoint for gradients)
         model, loss_weights, model_opt_state, weight_opt_state, info = \
             shooting_train_step(
                 model, loss_weights,
@@ -540,7 +603,8 @@ def train(config=None):
                 hh, all_ics, t_segments, V_segments,
                 t_sub, c_sub,
                 V_colloc, t_colloc, I_colloc_pA, I_colloc_hh,
-                phys_w, cont_w
+                phys_w, cont_w,
+                adjoint=adjoint
             )
 
         # Log
@@ -590,7 +654,7 @@ def train(config=None):
                 os.path.join(config.checkpoint_dir, "best_model.eqx"), model
             )
 
-    # ---- 8. Final Results ----
+    # ---- 9. Final Results ----
     elapsed_total = time.time() - start_time
     print(f"\n--- Training Complete ({elapsed_total:.0f}s) ---")
     print(f"Final data loss:       {loss_history[-1]['data_loss']:.6f}")
