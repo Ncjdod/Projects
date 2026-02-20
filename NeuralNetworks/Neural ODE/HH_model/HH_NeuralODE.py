@@ -142,8 +142,17 @@ class HHNeuralODE(eqx.Module):
         for layer in self.layers:
             x = jnp.tanh(layer(x))
 
-        # Output: [dV/dt, dm/dt, dh/dt, dn/dt]
-        return self.output_layer(x)
+        # Raw output
+        out = self.output_layer(x)
+
+        # dV/dt unconstrained, dm/dt dh/dt dn/dt must keep m,h,n in [0,1]
+        # Use the gating variable itself to scale the derivative direction
+        dVdt = out[0]
+        dmdt = jnp.where(out[1] > 0, out[1] * (1 - y[1]), out[1] * y[1])
+        dhdt = jnp.where(out[2] > 0, out[2] * (1 - y[2]), out[2] * y[2])
+        dndt = jnp.where(out[3] > 0, out[3] * (1 - y[3]), out[3] * y[3])
+
+        return jnp.array([dVdt, dmdt, dhdt, dndt])
 
 
 # ============================================================
