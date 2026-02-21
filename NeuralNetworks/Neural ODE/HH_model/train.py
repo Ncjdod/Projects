@@ -17,9 +17,10 @@ import os
 import sys
 import time
 
-# Add HH_model to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'HH_model'))
-
+# Add HH_model dir and parent (Neural ODE) dir to path
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _this_dir)
+sys.path.insert(0, os.path.join(_this_dir, '..'))
 import jax
 import jax.numpy as jnp
 import equinox as eqx
@@ -89,7 +90,7 @@ class Config:
     log_weight_clamp = 5.0  # Adversarial log-weight bounds [-5, 5]
     n_colloc = 64           # Collocation points per step
     n_loss_weights = 8      # Adversarial weight bins
-    log_every = 50          # Print every N epochs
+    log_every = 1          # Print every N epochs
     plot_every = 500        # Plot every N epochs
     checkpoint_every = 500  # Save checkpoint every N epochs
     checkpoint_dir = "HH_model/checkpoints"
