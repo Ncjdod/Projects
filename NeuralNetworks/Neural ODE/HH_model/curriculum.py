@@ -108,6 +108,29 @@ class CurriculumScheduler:
         """Current stage index (0 to n_stages-1)."""
         return min(epoch // self.epochs_per_stage, self.n_stages - 1)
 
+    def get_T(self, epoch):
+        """
+        Time window for the current stage (constant within each stage).
+
+        Unlike physics_weight and continuity_weight which interpolate
+        continuously, T must be step-wise because it determines array shapes
+        for JIT-compiled functions. Continuous T would trigger XLA
+        recompilation every epoch.
+        """
+        stage = self.get_stage_number(epoch)
+        if self.n_stages <= 1:
+            return self.T_end
+        frac = stage / (self.n_stages - 1)
+        if self.schedule == 'linear':
+            return self.T_start + (self.T_end - self.T_start) * frac
+        elif self.schedule == 'exponential':
+            return self.T_start * (self.T_end / max(self.T_start, 1e-8)) ** frac
+        elif self.schedule == 'cosine':
+            cos_frac = 0.5 * (1.0 - float(jnp.cos(jnp.pi * frac)))
+            return self.T_start + (self.T_end - self.T_start) * cos_frac
+        else:
+            return self.T_start + (self.T_end - self.T_start) * frac
+
     def get_n_segments(self, epoch):
         """Number of shooting segments for the current epoch (integer)."""
         stage = self.get_stage_number(epoch)
@@ -138,7 +161,7 @@ class CurriculumScheduler:
         stage_num = self.get_stage_number(epoch)
         progress = self._progress(epoch)
 
-        T = self._interpolate(self.T_start, self.T_end, epoch)
+        T = self.get_T(epoch)  # Step-wise per stage (avoids JIT recompilation)
         I_ext = self._interpolate(self.I_ext_start, self.I_ext_end, epoch)
         phys_w = self._interpolate(
             self.physics_weight_start, self.physics_weight_end, epoch

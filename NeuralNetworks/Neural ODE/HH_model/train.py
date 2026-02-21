@@ -93,7 +93,7 @@ class Config:
     log_every = 1          # Print every N epochs
     plot_every = 500        # Plot every N epochs
     checkpoint_every = 500  # Save checkpoint every N epochs
-    checkpoint_dir = "HH_model/checkpoints"
+    checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
     val_split = 0.8         # Fraction of data for training (rest for validation)
 
     # --- Integration ---
@@ -256,77 +256,111 @@ def get_curriculum_data(t_full, v_full, c_full, T_window):
 
 
 # ============================================================
-# Training Step (Minimax with Multiple Shooting)
+# Training Step Factory (Minimax with Multiple Shooting)
 # ============================================================
-@eqx.filter_jit
-def shooting_train_step(model, loss_weights,
-                        model_opt_state, weights_opt_state,
-                        model_optimizer, weights_optimizer,
-                        hh, all_ics, t_segments, V_segments,
-                        t_data, c_data,
-                        V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
-                        physics_weight, continuity_weight,
-                        adjoint=None):
+def make_shooting_train_step(model_optimizer, weights_optimizer,
+                              hh, all_ics, t_segments, V_segments,
+                              t_data, c_data, adjoint=None):
     """
-    Single minimax training step with multiple shooting.
+    Create a JIT-compiled minimax training step function.
 
-    All K segments integrate in parallel via jax.vmap.
-    ICs are data-pinned (from Allen data, not trainable).
-    Gradients through ODE solver use the specified adjoint method.
+    Uses a factory/closure pattern: static data (HH model, segment arrays,
+    optimizers, adjoint method) are captured in the closure rather than
+    passed as arguments. This is required for BacksolveAdjoint compatibility
+    — eqx.filter_jit traces all arguments as dynamic, but BacksolveAdjoint's
+    custom_vjp needs non-array values (like the adjoint and HH objects) to
+    remain static constants during tracing.
 
-    Two gradient computations:
-      1. Model params:  gradient DESCENT (minimize total loss)
-      2. Loss weights:  gradient ASCENT  (maximize physics loss)
+    The returned function only accepts values that change every step:
+    model params, loss weights, optimizer states, and collocation points.
+
+    Must be rebuilt when segment arrays change (at curriculum stage boundaries).
+
+    Args:
+        model_optimizer:    Optax optimizer for model (gradient descent)
+        weights_optimizer:  Optax optimizer for loss weights (gradient ascent)
+        hh:                 HodgkinHuxley instance (fixed)
+        all_ics:            (K, 4) data-pinned initial conditions
+        t_segments:         (K, n_pts_per_seg) time arrays per segment
+        V_segments:         (K, n_pts_per_seg) target voltage per segment
+        t_data:             Full time array for I_ext interpolation (fixed shape)
+        c_data:             Full current array in pA (fixed shape)
+        adjoint:            Diffrax adjoint method (None = RecursiveCheckpointAdjoint)
+
+    Returns:
+        step_fn:  JIT-compiled function with signature:
+                  (model, loss_weights, model_opt_state, weights_opt_state,
+                   V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
+                   physics_weight, continuity_weight)
+                  -> (model, loss_weights, model_opt_state, weights_opt_state, info)
     """
-    # --- Model gradients (descent) ---
-    @eqx.filter_value_and_grad(has_aux=True)
-    def model_loss(model):
-        return shooting_combined_loss(
-            model, loss_weights, hh,
-            all_ics, t_segments, V_segments,
-            t_data, c_data,
-            V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
-            physics_weight, continuity_weight,
-            adjoint=adjoint
+    @eqx.filter_jit
+    def step(model, loss_weights,
+             model_opt_state, weights_opt_state,
+             V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
+             physics_weight, continuity_weight):
+        """
+        Single minimax training step with multiple shooting.
+
+        All K segments integrate in parallel via jax.vmap.
+        ICs are data-pinned (from Allen data, not trainable).
+        Gradients through ODE solver use the configured adjoint method.
+
+        Two gradient computations:
+          1. Model params:  gradient DESCENT (minimize total loss)
+          2. Loss weights:  gradient ASCENT  (maximize physics loss)
+        """
+        # --- Model gradients (descent) ---
+        @eqx.filter_value_and_grad(has_aux=True)
+        def model_loss(model):
+            return shooting_combined_loss(
+                model, loss_weights, hh,
+                all_ics, t_segments, V_segments,
+                t_data, c_data,
+                V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
+                physics_weight, continuity_weight,
+                adjoint=adjoint
+            )
+
+        (loss, info), model_grads = model_loss(model)
+
+        # --- Weight gradients (ascent) ---
+        @eqx.filter_value_and_grad(has_aux=True)
+        def weight_loss(loss_weights):
+            return shooting_combined_loss(
+                model, loss_weights, hh,
+                all_ics, t_segments, V_segments,
+                t_data, c_data,
+                V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
+                physics_weight, continuity_weight,
+                adjoint=adjoint
+            )
+
+        (_, _), weight_grads = weight_loss(loss_weights)
+
+        # --- Update model (descent) ---
+        model_updates, model_opt_state_new = model_optimizer.update(
+            model_grads, model_opt_state, model
+        )
+        model = eqx.apply_updates(model, model_updates)
+
+        # --- Update weights (ascent = negate grads for optax) ---
+        neg_weight_grads = jax.tree.map(lambda g: -g, weight_grads)
+        weight_updates, weights_opt_state_new = weights_optimizer.update(
+            neg_weight_grads, weights_opt_state, loss_weights
+        )
+        loss_weights = eqx.apply_updates(loss_weights, weight_updates)
+
+        # --- Clamp adversarial log-weights to prevent runaway ---
+        loss_weights = eqx.tree_at(
+            lambda lw: lw.log_weights,
+            loss_weights,
+            jnp.clip(loss_weights.log_weights, -5.0, 5.0)
         )
 
-    (loss, info), model_grads = model_loss(model)
+        return model, loss_weights, model_opt_state_new, weights_opt_state_new, info
 
-    # --- Weight gradients (ascent) ---
-    @eqx.filter_value_and_grad(has_aux=True)
-    def weight_loss(loss_weights):
-        return shooting_combined_loss(
-            model, loss_weights, hh,
-            all_ics, t_segments, V_segments,
-            t_data, c_data,
-            V_colloc, t_colloc, I_colloc_model, I_colloc_hh,
-            physics_weight, continuity_weight,
-            adjoint=adjoint
-        )
-
-    (_, _), weight_grads = weight_loss(loss_weights)
-
-    # --- Update model (descent) ---
-    model_updates, model_opt_state = model_optimizer.update(
-        model_grads, model_opt_state, model
-    )
-    model = eqx.apply_updates(model, model_updates)
-
-    # --- Update weights (ascent = negate grads for optax) ---
-    neg_weight_grads = jax.tree.map(lambda g: -g, weight_grads)
-    weight_updates, weights_opt_state = weights_optimizer.update(
-        neg_weight_grads, weights_opt_state, loss_weights
-    )
-    loss_weights = eqx.apply_updates(loss_weights, weight_updates)
-
-    # --- Clamp adversarial log-weights to prevent runaway ---
-    loss_weights = eqx.tree_at(
-        lambda lw: lw.log_weights,
-        loss_weights,
-        jnp.clip(loss_weights.log_weights, -5.0, 5.0)
-    )
-
-    return model, loss_weights, model_opt_state, weights_opt_state, info
+    return step
 
 
 # ============================================================
@@ -556,6 +590,11 @@ def train(config=None):
     best_data_loss = float('inf')
     os.makedirs(config.checkpoint_dir, exist_ok=True)
 
+    # Pre-declare segment arrays and step function (built once per stage)
+    t_segments = V_segments = c_segments = all_ics = None
+    t_sub = v_sub = c_sub = None
+    train_step_fn = None  # JIT-compiled step, rebuilt each stage
+
     for epoch in range(config.total_epochs):
         # Get curriculum parameters
         stage = scheduler.get_stage(epoch)
@@ -566,27 +605,39 @@ def train(config=None):
         n_pts = stage['n_pts_per_seg']
         stage_num = stage['stage']
 
-        # Notify on stage change
+        # On stage change: rebuild segment arrays AND step function
+        # (shapes change here → new JIT compilation, once per stage)
         if stage_num != prev_stage:
             print(f"\n>> Stage {stage_num}: T={T_curr:.1f}ms, "
                   f"phys_w={phys_w:.2f}, cont_w={cont_w:.2f}, "
                   f"segments={n_seg}")
             prev_stage = stage_num
 
-        # Get curriculum sub-window of data
-        t_sub, v_sub, c_sub = get_curriculum_data(t_full, v_full, c_full, T_curr)
+            # Get curriculum sub-window and build segments ONCE per stage
+            t_sub, v_sub, c_sub = get_curriculum_data(t_full, v_full, c_full, T_curr)
+            if len(t_sub) < 10:
+                continue
+            boundaries = compute_segment_boundaries(t_sub, n_seg)
+            t_segments, V_segments, c_segments, all_ics = build_segment_arrays(
+                t_sub, v_sub, c_sub, boundaries, n_pts, hh
+            )
 
-        # Skip if too few points
-        if len(t_sub) < 10:
+            # Rebuild JIT step function with new segment arrays in closure.
+            # Static data (hh, optimizers, adjoint, segment arrays, t_full/c_full)
+            # are captured in the closure — required for BacksolveAdjoint
+            # compatibility (avoids DynamicJaxprTracer errors from eqx.filter_jit
+            # tracing non-array objects like HodgkinHuxley and BacksolveAdjoint).
+            train_step_fn = make_shooting_train_step(
+                model_optimizer, weights_optimizer,
+                hh, all_ics, t_segments, V_segments,
+                t_full, c_full, adjoint=adjoint
+            )
+
+        # Skip if data too sparse (from stage init above)
+        if t_segments is None or len(t_sub) < 10:
             continue
 
-        # Build segment arrays (data-pinned ICs, uniform grids for vmap)
-        boundaries = compute_segment_boundaries(t_sub, n_seg)
-        t_segments, V_segments, c_segments, all_ics = build_segment_arrays(
-            t_sub, v_sub, c_sub, boundaries, n_pts, hh
-        )
-
-        # Sample collocation points from actual trajectory (not uniform random)
+        # Sample collocation points from trajectory (re-randomized each epoch)
         key, ckey1, ckey2 = jax.random.split(key, 3)
         n_colloc = config.n_colloc
         indices = jax.random.randint(ckey1, (n_colloc,), 0, len(t_sub))
@@ -596,16 +647,14 @@ def train(config=None):
         I_colloc_hh = I_colloc_pA * config.pA_to_uA_per_cm2
 
         # Minimax step with multiple shooting (continuous adjoint for gradients)
+        # Collocation points and curriculum weights are the only per-epoch args.
+        # All other data (segments, t_full/c_full, hh, adjoint) is in the closure.
         model, loss_weights, model_opt_state, weight_opt_state, info = \
-            shooting_train_step(
+            train_step_fn(
                 model, loss_weights,
                 model_opt_state, weight_opt_state,
-                model_optimizer, weights_optimizer,
-                hh, all_ics, t_segments, V_segments,
-                t_sub, c_sub,
                 V_colloc, t_colloc, I_colloc_pA, I_colloc_hh,
                 phys_w, cont_w,
-                adjoint=adjoint
             )
 
         # Log
@@ -665,10 +714,17 @@ def train(config=None):
     # Final plot
     plot_final(model, hh, t_full, v_full, c_full, I_ext_fn_full, loss_history)
 
-    # Save model
-    model_path = os.path.join("HH_model", "trained_model.eqx")
+    # Save final model (absolute path based on script location)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(script_dir, "trained_model.eqx")
     eqx.tree_serialise_leaves(model_path, model)
-    print(f"Model saved to {model_path}")
+    print(f"Final model saved to {model_path}")
+
+    # Report best model location
+    best_model_path = os.path.join(
+        os.path.abspath(config.checkpoint_dir), "best_model.eqx"
+    )
+    print(f"Best model (data loss {best_data_loss:.6f}) at {best_model_path}")
 
     return model, loss_history
 
