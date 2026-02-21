@@ -81,25 +81,24 @@ class HHNeuralODE(eqx.Module):
             sigma:     Fourier frequency scale
             key:       JAX PRNG key
         """
-        keys = jax.random.split(key, 6)
+        keys = jax.random.split(key, 2)
 
-        input_dim = 6  # [t, V, m, h, n, I_ext]
-        fourier_out_dim = 2 * n_fourier  # sin + cos
+        input_dim = 6 
+        fourier_out_dim = 2 * n_fourier  
         hidden_dim = 128
 
         # Fixed Fourier features
         self.fourier = FourierFeatures(input_dim, n_fourier, sigma=sigma, key=keys[0])
 
         # 4 hidden layers, 128 neurons each
-        self.layers = [
-            eqx.nn.Linear(fourier_out_dim, hidden_dim, key=keys[1]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[2]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[3]),
-            eqx.nn.Linear(hidden_dim, hidden_dim, key=keys[4]),
-        ]
-
-        # Output: [dV/dt, dm/dt, dh/dt, dn/dt]
-        self.output_layer = eqx.nn.Linear(hidden_dim, 4, key=keys[5])
+        self.mlp = eqx.nn.MLP(
+        in_size=fourier_out_dim,
+        out_size=4,
+        width_size=128,
+        depth=4,
+        activation=jnp.tanh,
+        key=keys[1]
+        )
 
     @staticmethod
     def normalize_inputs(t, V, m, h, n, I_ext):
@@ -138,21 +137,17 @@ class HHNeuralODE(eqx.Module):
         # Fourier encoding
         x = self.fourier(x)
 
-        # 4-layer MLP with tanh
-        for layer in self.layers:
-            x = jnp.tanh(layer(x))
+        out = self.mlp(x)
 
-        # Raw output
-        out = self.output_layer(x)
+        dVdt = out[0:1]    
+        out_gates = out[1:4] 
+        y_gates = y[1:4]      
 
-        # dV/dt unconstrained, dm/dt dh/dt dn/dt must keep m,h,n in [0,1]
-        # Use the gating variable itself to scale the derivative direction
-        dVdt = out[0]
-        dmdt = jnp.where(out[1] > 0, out[1] * (1 - y[1]), out[1] * y[1])
-        dhdt = jnp.where(out[2] > 0, out[2] * (1 - y[2]), out[2] * y[2])
-        dndt = jnp.where(out[3] > 0, out[3] * (1 - y[3]), out[3] * y[3])
+        dgates_dt = jnp.where(out_gates > 0, 
+                      out_gates * (1.0 - y_gates), 
+                      out_gates * y_gates)
 
-        return jnp.array([dVdt, dmdt, dhdt, dndt])
+        return jnp.concatenate([dVdt, dgates_dt])
 
 
 # ============================================================
