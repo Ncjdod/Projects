@@ -104,9 +104,10 @@ class Config:
     # --- Adjoint Method ---
     # Controls how gradients are backpropagated through the ODE solver.
     # "backsolve":             Continuous adjoint (memory-efficient, approximate gradients)
+    #                          NOTE: incompatible with vmap over t_segments (multiple shooting)
     # "recursive_checkpoint":  Discretise-then-optimise (exact gradients, higher memory)
     # "direct":                Standard backprop through solver (no checkpointing)
-    adjoint_method = "backsolve"
+    adjoint_method = "recursive_checkpoint"
     adjoint_max_steps = None    # Max steps for backward pass (None = same as forward)
     adjoint_rtol = None         # Backward pass rtol (None = same as forward)
     adjoint_atol = None         # Backward pass atol (None = same as forward)
