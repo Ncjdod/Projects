@@ -11,7 +11,6 @@ def main():
 
     n_values = list(range(1, 121, 1))
 
-    # 1. Ground State Energy Convergence vs N for different lambda (Log Scale)
     plt.figure(figsize=(10, 6))
     lambda_values = [5.0, 8.0, 10.0, 100.0, 1000.0]
     for lambda_val in lambda_values:
@@ -33,7 +32,6 @@ def main():
     plt.savefig("convergence_lambda.png", dpi=300)
     plt.close()
 
-    # 2. Excited States Convergence vs N for lambda = 5.0
     plt.figure(figsize=(10, 6))
     quartic_scale = energy_scale / (length_scale ** 4)
     alpha_physical = 5.0 * quartic_scale
