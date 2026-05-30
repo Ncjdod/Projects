@@ -1,0 +1,9 @@
+numpy
+scipy
+pandas
+matplotlib
+jax
+optax
+diffrax
+equinox
+h5py
