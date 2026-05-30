@@ -9,3 +9,4 @@ The principal challenge arises from the high temporal frequency differences in t
 ## Next Steps
 
 To address these temporal scaling limitations, a new modeling approach based on neural operators and Koopman theory will soon be added to the repository to model the infinite-dimensional linear representations of the system dynamics.
+
