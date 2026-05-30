@@ -12,9 +12,9 @@ This directory contains the numerical implementation of the 1D Quantum Harmonic 
 
 ## 1. High-Precision Literature Verification
 
-Our implementation is verified against the exact high-precision eigenvalues from physics literature under natural units ($\lambda = 1.0$, $m = 1.0$, $\omega = 1.0$, $\hbar = 1.0$). 
+The implementation is verified against exact high-precision eigenvalues from physics literature under natural units ($\lambda = 1.0$, $m = 1.0$, $\omega = 1.0$, $\hbar = 1.0$). 
 
-As the Hilbert space dimension $N$ increases, our model converges exactly to the literature reference values:
+As the Hilbert space dimension $N$ increases, the model converges exactly to the literature reference values:
 
 | Basis Size ($N$) | Ground State $E_0$ (eV) | First Excited $E_1$ (eV) | Second Excited $E_2$ (eV) |
 |:---|:---|:---|:---|
@@ -24,7 +24,7 @@ As the Hilbert space dimension $N$ increases, our model converges exactly to the
 | **$N = 100$** | **$0.803770651234$** | **$2.737892268008$** | **$5.179291687639$** |
 | **Reference** | **$0.8037706513$** | **$2.7378922689$** | **$5.1792916890$** |
 
-At $N=100$, our model is accurate up to **10 decimal places** ($10^{-10}$ error margin).
+At $N=100$, the model is accurate up to **10 decimal places** ($10^{-10}$ error margin).
 
 ---
 
@@ -32,7 +32,7 @@ At $N=100$, our model is accurate up to **10 decimal places** ($10^{-10}$ error 
 
 Because eigenvalue solvers scale as $O(D^3)$ where $D$ is the matrix dimension, solving two independent $N/2$ matrices instead of one $N$ matrix yields a theoretical **$4\times$ speedup**. 
 
-Below is the benchmarking data comparing execution times for the full matrix solver vs. our block diagonalized solver:
+Below is the benchmarking data comparing execution times for the full matrix solver vs. the block diagonalized solver:
 
 | Hilbert Space Dimension ($N$) | Full Matrix Solver Time | Block Diagonal Solver Time | Measured Speedup Factor |
 |:---|:---|:---|:---|
