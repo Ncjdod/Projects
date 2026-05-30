@@ -11,7 +11,6 @@ def get_convergence_n(alpha_val, k, threshold=1e-8):
     quartic_scale = energy_scale / (length_scale ** 4)
     alpha_physical = alpha_val * quartic_scale
 
-    # Compute reference value at N=120
     qho_ref = QuantumHarmonicOscillator(N=120, alpha=alpha_physical, m=m, omega=omega, hbar=hbar)
     ref_energy = qho_ref.get_perturbed_state_block(k)[0] / 1.602176634e-19
 
@@ -30,7 +29,6 @@ def main():
     length_scale = np.sqrt(hbar / (m * omega))
     quartic_scale = energy_scale / (length_scale ** 4)
 
-    # 1. Parity and eigenvectors verification
     alpha_val = 5.0
     alpha_physical = alpha_val * quartic_scale
     qho_10 = QuantumHarmonicOscillator(N=10, alpha=alpha_physical, m=m, omega=omega, hbar=hbar)
@@ -41,18 +39,15 @@ def main():
     for n in range(10):
         parity_table_rows.append(f"| {n} | {v0[n]:.3e} | {v1[n]:.3e} |")
 
-    # 2. Timing benchmarks
     timing_rows = []
     n_bench_values = [100, 200, 300, 400, 500]
     for N in n_bench_values:
         qho_bench = QuantumHarmonicOscillator(N=N, alpha=alpha_physical, m=m, omega=omega, hbar=hbar)
         
-        # Benchmark full
         start = time.perf_counter()
         _ = qho_bench.eigenvalues
         t_full = (time.perf_counter() - start) * 1000.0  # ms
         
-        # Benchmark block
         start = time.perf_counter()
         _ = qho_bench.eigenvalues_block
         t_block = (time.perf_counter() - start) * 1000.0  # ms
@@ -60,21 +55,18 @@ def main():
         speedup = t_full / t_block
         timing_rows.append(f"| {N} | {t_full:.2f} ms | {t_block:.2f} ms | {speedup:.2f}x |")
 
-    # 3. Convergence for different lambda (alpha_coeff)
     lambda_values = [5.0, 8.0, 10.0, 100.0, 1000.0]
     lambda_conv_rows = []
     for l_val in lambda_values:
         n_conv = get_convergence_n(l_val, k=0)
         lambda_conv_rows.append(f"| {l_val} | {n_conv} |")
 
-    # 4. Convergence for higher states (alpha_coeff = 5.0)
     state_indices = [0, 1, 2, 3, 4]
     state_conv_rows = []
     for k_val in state_indices:
         n_conv = get_convergence_n(5.0, k=k_val)
         state_conv_rows.append(f"| State k={k_val} | {n_conv} |")
 
-    # 5. Write results.md
     with open("results.md", "w") as f:
         f.write("# Galerkin Projection of 1D Quantum Harmonic Oscillator with quartic perturbation\n\n")
         f.write("This report presents numerical results for the 1D quantum harmonic oscillator perturbed by $\\lambda x^4$ using the Galerkin projection in the number state (Fock) basis.\n\n")
